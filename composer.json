@@ -1,0 +1,22 @@
+{
+	"name": "kbs1/encrypted-api-client-php",
+	"description": "Encrypted API - PHP client implementation.",
+	"keywords": ["encrypted", "api"],
+	"type": "library",
+	"license": "MIT",
+	"authors": [
+		{
+			"name": "kbs1",
+			"email": "viliam.kubis@gmail.com"
+		}
+	],
+	"require": {
+		"php": ">=7.0",
+		"guzzlehttp/guzzle": "~6.0"
+	},
+	"autoload": {
+		"psr-4": {
+			"Kbs1\\EncryptedApiClientPhp\\": "src/"
+		}
+	}
+}
