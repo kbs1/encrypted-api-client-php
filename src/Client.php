@@ -73,6 +73,18 @@ class Client
 		return $this;
 	}
 
+	public function withManagedHeader($name)
+	{
+		$this->middleware->withManagedHeader($name);
+		return $this;
+	}
+
+	public function withoutManagedHeader($name)
+	{
+		$this->middleware->withoutManagedHeader($name);
+		return $this;
+	}
+
 	public function setUnencryptedFilesHeaders($value)
 	{
 		$this->middleware->setUnencryptedFilesHeaders($value);

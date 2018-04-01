@@ -18,6 +18,7 @@ class EncryptedApiMiddleware
 	protected $secrets;
 	protected $overriddenHeaders = ['content-type', 'content-length', 'transfer-encoding', 'expect'];
 	protected $unencryptedHeaders = ['user-agent', 'host'];
+	protected $unmanagedHeaders = [];
 	protected $filesOverriddenHeaders = ['content-type', 'content-length'];
 	protected $sendFilesHeadersUnencrypted = false;
 	protected $request, $raw_response, $response;
@@ -49,7 +50,7 @@ class EncryptedApiMiddleware
 		$name = strtolower($name);
 
 		if (in_array($name, $this->overriddenHeaders))
-			throw new \InvalidArgumentException($name . ' can not be sent as a plain header.');
+			throw new \InvalidArgumentException($name . ' can not be sent as plain header.');
 
 		if (!in_array($name, $this->unencryptedHeaders))
 			$this->unencryptedHeaders[] = $name;
@@ -58,10 +59,32 @@ class EncryptedApiMiddleware
 	public function withoutPlainHeader($name)
 	{
 		$name = strtolower($name);
+
 		if (($key = array_search($name, $this->unencryptedHeaders)) !== false) {
 			unset($this->unencryptedHeaders[$key]);
 			$this->unencryptedHeaders = array_values($this->unencryptedHeaders);
 		}
+	}
+
+	public function withManagedHeader($name)
+	{
+		$name = strtolower($name);
+
+		if (($key = array_search($name, $this->unmanagedHeaders)) !== false) {
+			unset($this->unmanagedHeaders[$key]);
+			$this->unmanagedHeaders = array_values($this->unmanagedHeaders);
+		}
+	}
+
+	public function withoutManagedHeader($name)
+	{
+		$name = strtolower($name);
+
+		if (in_array($name, $this->overriddenHeaders))
+			throw new \InvalidArgumentException($name . ' can not be sent as unmanaged header.');
+
+		if (!in_array($name, $this->unmanagedHeaders))
+			$this->unmanagedHeaders[] = $name;
 	}
 
 	public function setUnencryptedFilesHeaders($value)
@@ -114,10 +137,16 @@ class EncryptedApiMiddleware
 		// includes Content-Type and other headers if applied by GuzzleHttp Client applyOptions()
 		$headers = $request->getHeaders();
 
-		// transform the headers array into required format
-		foreach ($headers as $header => $values)
+		// transform the headers array into required format and remove any unmanaged headers
+		foreach ($headers as $header => $values) {
+			if (in_array(strtolower($header), $this->unmanagedHeaders)) {
+				unset($headers[$header]);
+				continue;
+			}
+
 			if (!is_array($values))
 				$headers[$header] = [$values];
+		}
 
 		$encryptor = new Encryptor($headers, $data, $this->secrets->getSecret1(), $this->secrets->getSecret2(), null, $uri, $method);
 		$transmit = $encryptor->getTransmit();
@@ -142,10 +171,16 @@ class EncryptedApiMiddleware
 			'headers' => $request->getHeaders(),
 		];
 
-		// transform main request headers array into required format
-		foreach ($main_request['headers'] as $header => $values)
+		// transform main request headers array into required format and remove any unmanaged headers
+		foreach ($main_request['headers'] as $header => $values) {
+			if (in_array(strtolower($header), $this->unmanagedHeaders)) {
+				unset($main_request['headers'][$header]);
+				continue;
+			}
+
 			if (!is_array($values))
 				$main_request['headers'][$header] = [$values];
+		}
 
 		// build multipart and uploads array
 		$uploads = [];
@@ -267,9 +302,8 @@ class EncryptedApiMiddleware
 
 	protected function handleRequest(RequestInterface $request, $options, $id)
 	{
-		// see which headers should be unencrypted - all headers are always also sent as encrypted,
-		// their values override any unencrypted values upon request decryption by the server
-		$unencryptedHeaders = array_merge($this->overriddenHeaders, $this->unencryptedHeaders);
+		// see which headers should be sent unencrypted - some of these headers may also be unmanaged
+		$unencryptedHeaders = array_merge($this->overriddenHeaders, $this->unencryptedHeaders, $this->unmanagedHeaders);
 		foreach ($request->getHeaders() as $header => $values) {
 			$name = strtolower($header);
 
@@ -297,7 +331,7 @@ class EncryptedApiMiddleware
 			// replace response body
 			$response = $response->withBody(stream_for($original['data']));
 
-			// append decrypted headers transmitted securely
+			// replace headers transmitted ecrypted
 			foreach ($original['headers'] as $name => $values) {
 				$response = $response->withoutHeader($name);
 
