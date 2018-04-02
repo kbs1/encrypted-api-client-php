@@ -61,15 +61,15 @@ class Client
 		return $this;
 	}
 
-	public function withPlainHeader($name)
+	public function withVisibleHeader($name)
 	{
-		$this->middleware->withPlainHeader($name);
+		$this->middleware->withVisibleHeader($name);
 		return $this;
 	}
 
-	public function withoutPlainHeader($name)
+	public function withoutVisibleHeader($name)
 	{
-		$this->middleware->withoutPlainHeader($name);
+		$this->middleware->withoutVisibleHeader($name);
 		return $this;
 	}
 
@@ -85,9 +85,9 @@ class Client
 		return $this;
 	}
 
-	public function setUnencryptedFilesHeaders($value)
+	public function visibleFilesHeaders($value)
 	{
-		$this->middleware->setUnencryptedFilesHeaders($value);
+		$this->middleware->visibleFilesHeaders($value);
 		return $this;
 	}
 

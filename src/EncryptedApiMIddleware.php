@@ -17,10 +17,10 @@ class EncryptedApiMiddleware
 	protected $next_handler, $request_completed = false, $options;
 	protected $secrets;
 	protected $overriddenHeaders = ['content-type', 'content-length', 'transfer-encoding', 'expect'];
-	protected $unencryptedHeaders = ['user-agent', 'host'];
+	protected $visibleHeaders = ['user-agent', 'host'];
 	protected $unmanagedHeaders = [];
 	protected $filesOverriddenHeaders = ['content-type', 'content-length'];
-	protected $sendFilesHeadersUnencrypted = false;
+	protected $filesVisibleHeaders = false;
 	protected $request, $raw_response, $response;
 
 	public function __construct(SharedSecrets $secrets)
@@ -45,24 +45,24 @@ class EncryptedApiMiddleware
 			return $this->sendJsonRequest($request, $options);
 	}
 
-	public function withPlainHeader($name)
+	public function withVisibleHeader($name)
 	{
 		$name = strtolower($name);
 
 		if (in_array($name, $this->overriddenHeaders))
-			throw new \InvalidArgumentException($name . ' can not be sent as plain header.');
+			throw new \InvalidArgumentException($name . ' can not be sent as visible header.');
 
-		if (!in_array($name, $this->unencryptedHeaders))
-			$this->unencryptedHeaders[] = $name;
+		if (!in_array($name, $this->visibleHeaders))
+			$this->visibleHeaders[] = $name;
 	}
 
-	public function withoutPlainHeader($name)
+	public function withoutVisibleHeader($name)
 	{
 		$name = strtolower($name);
 
-		if (($key = array_search($name, $this->unencryptedHeaders)) !== false) {
-			unset($this->unencryptedHeaders[$key]);
-			$this->unencryptedHeaders = array_values($this->unencryptedHeaders);
+		if (($key = array_search($name, $this->visibleHeaders)) !== false) {
+			unset($this->visibleHeaders[$key]);
+			$this->visibleHeaders = array_values($this->visibleHeaders);
 		}
 	}
 
@@ -87,9 +87,9 @@ class EncryptedApiMiddleware
 			$this->unmanagedHeaders[] = $name;
 	}
 
-	public function setUnencryptedFilesHeaders($value)
+	public function visibleFilesHeaders($value)
 	{
-		$this->sendFilesHeadersUnencrypted = (boolean) $value;
+		$this->filesVisibleHeaders = (boolean) $value;
 	}
 
 	public function isRequestCompleted()
@@ -225,7 +225,7 @@ class EncryptedApiMiddleware
 			$multipart[] = [
 				'name' => $field['name'],
 				'contents' => $tmp_file,
-				'headers' => $this->sendFilesHeadersUnencrypted ? $file_headers + ($field['headers'] ?? []) : $file_headers,
+				'headers' => $this->filesVisibleHeaders ? $file_headers + ($field['headers'] ?? []) : $file_headers,
 				'filename' => $filename,
 			];
 
@@ -302,12 +302,12 @@ class EncryptedApiMiddleware
 
 	protected function handleRequest(RequestInterface $request, $options, $id)
 	{
-		// see which headers should be sent unencrypted - some of these headers may also be unmanaged
-		$unencryptedHeaders = array_merge($this->overriddenHeaders, $this->unencryptedHeaders, $this->unmanagedHeaders);
+		// see which headers should be visible - some of these headers may also be unmanaged
+		$visibleHeaders = array_merge($this->overriddenHeaders, $this->visibleHeaders, $this->unmanagedHeaders);
 		foreach ($request->getHeaders() as $header => $values) {
 			$name = strtolower($header);
 
-			if (!in_array($name, $unencryptedHeaders))
+			if (!in_array($name, $visibleHeaders))
 				$request = $request->withoutHeader($name);
 		}
 
@@ -324,14 +324,10 @@ class EncryptedApiMiddleware
 			if ($original['url'] !== null || $original['method'] !== null || $original['uploads'] !== null)
 				throw new InvalidResponseException;
 
-			// check we got back the same request id as we sent
-			if ($original['id'] !== $id)
-				throw new InvalidResponseIdException;
-
 			// replace response body
 			$response = $response->withBody(stream_for($original['data']));
 
-			// replace headers transmitted ecrypted
+			// replace headers transmitted encrypted
 			foreach ($original['headers'] as $name => $values) {
 				$response = $response->withoutHeader($name);
 
@@ -340,7 +336,16 @@ class EncryptedApiMiddleware
 			}
 
 			$this->request_completed = true;
-			return $this->response = $response;
+			$this->response = $response;
+
+			// check we got back the same request id as we sent
+			// do this as last step, since it still might be possible the response was decrypted, in which case
+			// the server used the same pair of secrets to send the response, but failed to parse our payload
+			// for some reason. Catching this exception will still allow us to retrieve the decrypted response.
+			if ($original['id'] !== $id)
+				throw new InvalidResponseIdException;
+
+			return $response;
 		});
 	}
 }
