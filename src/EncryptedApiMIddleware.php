@@ -7,89 +7,27 @@ use Kbs1\EncryptedApiBase\Cryptography\Support\SharedSecrets;
 
 use Kbs1\EncryptedApiClientPhp\Exceptions\{InvalidResponseException, InvalidResponseIdException};
 
-use Psr\Http\Message\{RequestInterface, ResponseInterface};
-use GuzzleHttp\PrepareBodyMiddleware;
-use function GuzzleHttp\Psr7\{stream_for, mimetype_from_filename};
+use GuzzleHttp\{Client as GuzzleClient, PrepareBodyMiddleware};
 use GuzzleHttp\Psr7\MultipartStream;
+use function GuzzleHttp\Psr7\{stream_for, mimetype_from_filename};
+use Psr\Http\Message\{RequestInterface, ResponseInterface};
 
 class EncryptedApiMiddleware
 {
-	protected $next_handler, $request_completed = false, $options;
+	protected $guzzleClient, $nextHandler;
 	protected $secrets;
 	protected $overriddenHeaders = ['content-type', 'content-length', 'transfer-encoding', 'expect'];
 	protected $visibleHeaders = ['user-agent', 'host'];
 	protected $unmanagedHeaders = [];
 	protected $filesOverriddenHeaders = ['content-type', 'content-length'];
 	protected $filesVisibleHeaders = false;
-	protected $request, $raw_response, $response;
+	protected $lastRawRequest, $lastRawResponse;
+	protected $request_completed = false;
+	protected $methodSpoofing = true;
 
-	public function __construct(SharedSecrets $secrets)
+	public function __construct(GuzzleClient $guzzleClient)
 	{
-		$this->secrets = $secrets;
-	}
-
-	public function setNextHandler(callable $next_handler)
-	{
-		$this->next_handler = $next_handler;
-		return $this;
-	}
-
-	public function __invoke(RequestInterface $request, array &$options)
-	{
-		$this->options = $options;
-		$this->request_completed = false;
-
-		if (isset($options['encrypted_api']['multipart']))
-			return $this->sendMultipartRequest($request, $options);
-		else
-			return $this->sendJsonRequest($request, $options);
-	}
-
-	public function withVisibleHeader($name)
-	{
-		$name = strtolower($name);
-
-		if (in_array($name, $this->overriddenHeaders))
-			throw new \InvalidArgumentException($name . ' can not be sent as visible header.');
-
-		if (!in_array($name, $this->visibleHeaders))
-			$this->visibleHeaders[] = $name;
-	}
-
-	public function withoutVisibleHeader($name)
-	{
-		$name = strtolower($name);
-
-		if (($key = array_search($name, $this->visibleHeaders)) !== false) {
-			unset($this->visibleHeaders[$key]);
-			$this->visibleHeaders = array_values($this->visibleHeaders);
-		}
-	}
-
-	public function withManagedHeader($name)
-	{
-		$name = strtolower($name);
-
-		if (($key = array_search($name, $this->unmanagedHeaders)) !== false) {
-			unset($this->unmanagedHeaders[$key]);
-			$this->unmanagedHeaders = array_values($this->unmanagedHeaders);
-		}
-	}
-
-	public function withoutManagedHeader($name)
-	{
-		$name = strtolower($name);
-
-		if (in_array($name, $this->overriddenHeaders))
-			throw new \InvalidArgumentException($name . ' can not be sent as unmanaged header.');
-
-		if (!in_array($name, $this->unmanagedHeaders))
-			$this->unmanagedHeaders[] = $name;
-	}
-
-	public function visibleFilesHeaders($value)
-	{
-		$this->filesVisibleHeaders = (boolean) $value;
+		$this->guzzleClient = $guzzleClient;
 	}
 
 	public function isRequestCompleted()
@@ -97,44 +35,109 @@ class EncryptedApiMiddleware
 		return $this->request_completed;
 	}
 
-	public function getRequest()
+	public function getLastRawRequest()
 	{
 		if (!$this->isRequestCompleted())
 			throw new \LogicException('Perform a request first.');
 
-		return $this->request;
+		return $this->lastRawRequest;
 	}
 
-	public function getRequestOption($key = null)
-	{
-		if ($key === null)
-			return $this->options;
-
-		return $this->options[$key] ?? null;
-	}
-
-	public function getRawResponse()
+	public function getLastRawResponse()
 	{
 		if (!$this->isRequestCompleted())
 			throw new \LogicException('Perform a request first.');
 
-		return $this->raw_response;
+		return $this->lastRawResponse;
 	}
 
-	public function getResponse()
+	public function setNextHandler(callable $nextHandler)
 	{
-		if (!$this->isRequestCompleted())
-			throw new \LogicException('Perform a request first.');
+		$this->nextHandler = $nextHandler;
+		return $this;
+	}
 
-		return $this->response;
+	public function __invoke(RequestInterface $request, array &$options)
+	{
+		$this->options = $options;
+		$this->request_completed = false;
+		$request = $this->applyOptions($request, $options);
+
+		if (isset($options['encrypted_api']['multipart']))
+			return $this->sendMultipartRequest($request, $options);
+		else
+			return $this->sendJsonRequest($request, $options);
+	}
+
+	protected function applyOptions(RequestInterface $request, array &$options)
+	{
+		if ($this->methodSpoofing) {
+			if (isset($options['encrypted_api']['spoofed_method'])) {
+				$request = $request->withoutHeader('X-Http-Method-Override');
+				$request = $request->withHeader('X-Http-Method-Override', strtoupper($options['encrypted_api']['spoofed_method']));
+			} else if (strtolower($request->getMethod()) == 'get' && (!isset($options['encrypted_api']['automatic_method_spoofing']) || $options['encrypted_api']['automatic_method_spoofing'])) {
+				$request = $request->withMethod('POST');
+				$request = $request->withoutHeader('X-Http-Method-Override');
+				$request = $request->withHeader('X-Http-Method-Override', 'GET');
+			}
+		}
+
+		$this->visibleHeaders = ['user-agent', 'host'];
+		if (isset($options['encrypted_api']['visible_headers'])) {
+			foreach ((array) $options['encrypted_api']['visible_headers'] as $header) {
+				$header = strtolower($header);
+
+				if (in_array($header, $this->overriddenHeaders))
+					throw new \InvalidArgumentException($header . ' can not be sent as visible header.');
+
+				if (!in_array($header, $this->visibleHeaders))
+					$this->visibleHeaders[] = $header;
+			}
+		}
+
+		$this->unmanagedHeaders = [];
+		if (isset($options['encrypted_api']['unmanaged_headers'])) {
+			foreach ((array) $options['encrypted_api']['unmanaged_headers'] as $header) {
+				$header = strtolower($header);
+
+				if (in_array($header, $this->overriddenHeaders))
+					throw new \InvalidArgumentException($header . ' can not be sent as unmanaged header.');
+
+				if (!in_array($header, $this->unmanagedHeaders))
+					$this->unmanagedHeaders[] = $header;
+			}
+		}
+
+		$this->filesVisibleHeaders = isset($options['encrypted_api']['files_visible_headers']) && $options['encrypted_api']['files_visible_headers'];
+
+		return $request;
+	}
+
+	protected function resolveSecrets(array $options)
+	{
+		$secret1 = $options['encrypted_api']['secret1'] ?? null;
+		$secret2 = $options['encrypted_api']['secret2'] ?? null;
+
+		if ($secret1 && $secret2)
+			return new SharedSecrets($secret1, $secret2);
+
+		$config = $this->guzzleClient->getConfig('encrypted_api');
+		$secret1 = $config['secret1'] ?? null;
+		$secret2 = $config['secret2'] ?? null;
+
+		if ($secret1 && $secret2)
+			return new SharedSecrets($secret1, $secret2);
+
+		throw new \InvalidArgumentException('Unable to resolve shared secrets for request. Either set default shared secrets for Guzzle client as encrypted_api/secret1 and encrypted_api/secret2 config values, or provide shared secrets under the same keys as request options.');
 	}
 
 	protected function sendJsonRequest(RequestInterface $request, $options)
 	{
+		$secrets = $this->resolveSecrets($options);
 		$data = (string) $request->getBody();
 		$method = $request->getMethod();
 		$uri = (string) $request->getUri();
-		// includes Content-Type and other headers if applied by GuzzleHttp Client applyOptions()
+		// includes Content-Type and other headers if applied by GuzzleHttp\Client applyOptions()
 		$headers = $request->getHeaders();
 
 		// transform the headers array into required format and remove any unmanaged headers
@@ -148,7 +151,7 @@ class EncryptedApiMiddleware
 				$headers[$header] = [$values];
 		}
 
-		$encryptor = new Encryptor($headers, $data, $this->secrets->getSecret1(), $this->secrets->getSecret2(), null, $uri, $method);
+		$encryptor = new Encryptor($headers, $data, $secrets->getSecret1(), $secrets->getSecret2(), null, $uri, $method);
 		$transmit = $encryptor->getTransmit();
 
 		// replace the request body
@@ -158,11 +161,13 @@ class EncryptedApiMiddleware
 		// replace Content-Type header
 		$request = $request->withHeader('Content-Type', 'application/json');
 
-		return $this->handleRequest($request, $options, $encryptor->getId());
+		return $this->handleRequest($request, $options, $encryptor->getId(), $secrets);
 	}
 
 	protected function sendMultipartRequest(RequestInterface $request, &$options)
 	{
+		$secrets = $this->resolveSecrets($options);
+
 		// capture main request data
 		$main_request = [
 			'data' => (string) $request->getBody(),
@@ -211,7 +216,7 @@ class EncryptedApiMiddleware
 			if ($contents->getSize())
 				$headers['Content-Length'] = [$contents->getSize()];
 
-			$encryptor = new Encryptor($headers, (string) $contents, $this->secrets->getSecret1(), $this->secrets->getSecret2(), null, $main_request['uri'], $main_request['method'], true);
+			$encryptor = new Encryptor($headers, (string) $contents, $secrets->getSecret1(), $secrets->getSecret2(), null, $main_request['uri'], $main_request['method'], true);
 			$transmit = $encryptor->getTransmit();
 
 			$tmp_file = tmpfile();
@@ -240,7 +245,7 @@ class EncryptedApiMiddleware
 		unset($encryptor, $transmit, $options['encrypted_api']['multipart']);
 
 		// prepare main encrypted payload body
-		$encryptor = new Encryptor($main_request['headers'], $main_request['data'], $this->secrets->getSecret1(), $this->secrets->getSecret2(), null, $main_request['uri'], $main_request['method'], $uploads);
+		$encryptor = new Encryptor($main_request['headers'], $main_request['data'], $secrets->getSecret1(), $secrets->getSecret2(), null, $main_request['uri'], $main_request['method'], $uploads);
 		$transmit = $encryptor->getTransmit();
 
 		// prepend multipart array, first entry is main encrypted payload with all standard form fields
@@ -260,7 +265,7 @@ class EncryptedApiMiddleware
 		// replace Content-Type header
 		$request = $request->withHeader('Content-Type', 'multipart/form-data; boundary=' . $request->getBody()->getBoundary());
 
-		return $this->handleRequest($request, $options, $encryptor->getId());
+		return $this->handleRequest($request, $options, $encryptor->getId(), $secrets);
 	}
 
 	protected function recomputeStandardHeaders($request, $options)
@@ -300,7 +305,7 @@ class EncryptedApiMiddleware
 		return !$in_array;
 	}
 
-	protected function handleRequest(RequestInterface $request, $options, $id)
+	protected function handleRequest(RequestInterface $request, $options, $id, $secrets)
 	{
 		// see which headers should be visible - some of these headers may also be unmanaged
 		$visibleHeaders = array_merge($this->overriddenHeaders, $this->visibleHeaders, $this->unmanagedHeaders);
@@ -311,13 +316,13 @@ class EncryptedApiMiddleware
 				$request = $request->withoutHeader($name);
 		}
 
-		$this->request = $request;
-		$fn = $this->next_handler;
+		$this->lastRawRequest = clone $request;
+		$fn = $this->nextHandler;
 
-		return $fn($request, $options)->then(function (ResponseInterface $response) use ($request, $options, $id) {
-			$this->raw_response = clone $response;
+		return $fn($request, $options)->then(function (ResponseInterface $response) use ($id, $secrets) {
+			$this->lastRawResponse = clone $response;
 
-			$decryptor = new Decryptor((string) $response->getBody(), $this->secrets->getSecret1(), $this->secrets->getSecret2());
+			$decryptor = new Decryptor((string) $response->getBody(), $secrets->getSecret1(), $secrets->getSecret2());
 			$original = $decryptor->getOriginal();
 
 			// check if this is a valid response
@@ -335,8 +340,13 @@ class EncryptedApiMiddleware
 					$response = $response->withAddedHeader($name, $value);
 			}
 
+			// check response haders after decryption (even Location header is transmitted securely by default)
+			if (substr($response->getStatusCode(), 0, 1) == '3' && $response->hasHeader('Location'))
+				$this->methodSpoofing = false; // spoof only once, let Guzzle handle redirect request method
+			else
+				$this->methodSpoofing = true; // spoof next request if asked to
+
 			$this->request_completed = true;
-			$this->response = $response;
 
 			// check we got back the same request id as we sent
 			// do this as last step, since it still might be possible the response was decrypted, in which case

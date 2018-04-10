@@ -2,142 +2,43 @@
 
 namespace Kbs1\EncryptedApiClientPhp;
 
-use Kbs1\EncryptedApiBase\Cryptography\Support\SharedSecrets;
 use GuzzleHttp\Client as GuzzleClient;
 use function GuzzleHttp\Psr7\stream_for;
 
 class Client
 {
-	protected $guzzle_client, $options, $middleware, $secrets;
-	protected $automaticMethodSpoofing = true, $spoofedMethod;
-
-	public function __construct(GuzzleClient $guzzle_client, $secret1, $secret2)
+	public static function prepare(GuzzleClient $guzzle_client)
 	{
-		$this->guzzle_client = $guzzle_client;
-		$this->secrets = new SharedSecrets($secret1, $secret2);
-		$this->middleware = new EncryptedApiMiddleware($this->secrets);
+		$middleware = new EncryptedApiMiddleware($guzzle_client);
+		$stack = $guzzle_client->getConfig('handler');
 
-		$stack = $this->guzzle_client->getConfig('handler');
-		$stack->push(function (callable $handler) {
-			$this->middleware->setNextHandler($handler);
-			return $this->middleware;
+		// TODO: check if encrypted api is already added
+		$stack->push(function (callable $handler) use ($middleware) {
+			$middleware->setNextHandler($handler);
+			return $middleware;
 		}, 'encrypted_api');
+
+		return $middleware;
 	}
 
-	public static function create($secret1, $secret2)
+	public static function createDefaultGuzzleClient($secret1 = null, $secret2 = null, &$middleware = null)
 	{
-		return new self(new GuzzleClient(['http_errors' => false]), $secret1, $secret2);
+		$guzzle_client = new GuzzleClient([
+			'http_errors' => false,
+			'encrypted_api' => [
+				'secret1' => $secret1,
+				'secret2' => $secret2,
+			],
+		]);
+
+		$middleware = self::prepare($guzzle_client);
+		return $guzzle_client;
 	}
 
-	public function __call($method, $arguments)
+	public static function prepareOptions($options)
 	{
-		// TODO: investigate request and requestAsync
-		if (!in_array(strtolower($method), ['request', 'requestAsync']) && method_exists($this->guzzle_client, $method))
-			return call_user_func_array([$this->guzzle_client, $method], $arguments);
-
-		if (count($arguments) < 1)
-			throw new \InvalidArgumentException('Magic request methods require a URI and optional options array');
-
-		$method = strtolower($method);
-		$is_async = substr($method, -5) === 'async';
-
-		if ($is_async)
-			$method = substr($method, 0, -5);
-
-		$method = $this->prepareMethodSpoofing($method, $arguments);
-
-		return call_user_func_array([$this->guzzle_client, $method . ($is_async ? 'Async' : '')], $this->getGuzzleParameters($method, $arguments));
-	}
-
-	public function automaticMethodSpoofing($value)
-	{
-		$this->automaticMethodSpoofing = (boolean) $value;
-		return $this;
-	}
-
-	public function setSpoofedMethod($value)
-	{
-		$this->spoofedMethod = strtolower($value);
-		return $this;
-	}
-
-	public function withVisibleHeader($name)
-	{
-		$this->middleware->withVisibleHeader($name);
-		return $this;
-	}
-
-	public function withoutVisibleHeader($name)
-	{
-		$this->middleware->withoutVisibleHeader($name);
-		return $this;
-	}
-
-	public function withManagedHeader($name)
-	{
-		$this->middleware->withManagedHeader($name);
-		return $this;
-	}
-
-	public function withoutManagedHeader($name)
-	{
-		$this->middleware->withoutManagedHeader($name);
-		return $this;
-	}
-
-	public function visibleFilesHeaders($value)
-	{
-		$this->middleware->visibleFilesHeaders($value);
-		return $this;
-	}
-
-	public function getGuzzleClient()
-	{
-		return $this->guzzle_client;
-	}
-
-	public function getRequest()
-	{
-		return $this->middleware->getRequest();
-	}
-
-	public function getRequestOption($key = null)
-	{
-		return $this->middleware->getRequestOption($key);
-	}
-
-	public function getRawResponse()
-	{
-		return $this->middleware->getRawResponse();
-	}
-
-	public function getResponse()
-	{
-		return $this->middleware->getResponse();
-	}
-
-	protected function prepareMethodSpoofing($method, &$arguments)
-	{
-		if ($this->spoofedMethod) {
-			$arguments[1]['headers'] = $arguments[1]['headers'] ?? [];
-			$arguments[1]['headers']['X-Http-Method-Override'] = strtoupper($this->spoofedMethod);
-			return $method;
-		}
-
-		if ($this->automaticMethodSpoofing && $method === 'get') {
-			$arguments[1]['headers'] = $arguments[1]['headers'] ?? [];
-			$arguments[1]['headers']['X-Http-Method-Override'] = 'GET';
-			return 'post';
-		}
-
-		return $method;
-	}
-
-	protected function getGuzzleParameters($method, $arguments)
-	{
-		$uri = $arguments[0];
-		$options = $arguments[1] ?? null;
-		$this->options = $options; // save last request options
+		if (!is_array($options))
+			return $options;
 
 		if (isset($options['multipart'])) {
 			$options['encrypted_api']['multipart'] = $options['multipart'];
@@ -175,6 +76,6 @@ class Client
 			$options['encrypted_api']['multipart'] = array_values($options['encrypted_api']['multipart']);
 		}
 
-		return [$uri, $options];
+		return $options;
 	}
 }
