@@ -9,10 +9,23 @@ class Client
 {
 	public static function prepare(GuzzleClient $guzzle_client)
 	{
-		$middleware = new EncryptedApiMiddleware($guzzle_client);
 		$stack = $guzzle_client->getConfig('handler');
 
-		// TODO: check if encrypted api is already added
+		$reflection = new \ReflectionObject($stack);
+		$property = $reflection->getProperty('stack');
+		$property->setAccessible(true);
+		$middlewares = $property->getValue($stack);
+
+		foreach ($middlewares as $middleware) {
+			$name = $middleware[1] ?? '';
+			if ($name == 'encrypted_api') {
+				$reflection = new \ReflectionFunction($middleware[0]);
+				$static = $reflection->getStaticVariables();
+				return $static['middleware'] ?? null;
+			}
+		}
+
+		$middleware = new EncryptedApiMiddleware($guzzle_client);
 		$stack->push(function (callable $handler) use ($middleware) {
 			$middleware->setNextHandler($handler);
 			return $middleware;
