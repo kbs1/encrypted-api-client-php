@@ -190,7 +190,6 @@ class EncryptedApiMiddleware
 		// build multipart and uploads array
 		$uploads = [];
 		foreach ($options['encrypted_api']['multipart'] as $field) {
-			$name = $field['name'];
 			$filename = $field['filename'] ?? null;
 			$contents = stream_for($field['contents'] ?? '');
 			$headers = $field['headers'] ?? [];
@@ -228,15 +227,15 @@ class EncryptedApiMiddleware
 			];
 
 			$multipart[] = [
-				'name' => $field['name'],
+				'name' => str_replace('"', '\\"', $field['name']), // overcome guzzle bug and escape quotes in form field name, otherwise Content-Disposition header will be invalid
 				'contents' => $tmp_file,
 				'headers' => $this->filesVisibleHeaders ? $file_headers + ($field['headers'] ?? []) : $file_headers,
-				'filename' => $filename,
+				'filename' => str_replace('"', '\\"', $filename), // overcome guzzle bug and escape quotes in filename
 			];
 
-			if ($this->isValidFileFormName($name))
+			if ($this->isValidFileFormName($field['name']))
 				$uploads[] = [
-					'name' => $name,
+					'name' => $field['name'],
 					'filename' => basename($filename === '0' ? stream_get_meta_data($tmp_file)['uri'] : $filename), // overcome guzzle MultipartStream bug that overrides filename if filename is '0' ('empty' check will pass)
 					'signature' => $encryptor->getSignature(),
 				];
