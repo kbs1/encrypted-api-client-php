@@ -226,6 +226,9 @@ class EncryptedApiMiddleware
 				'Content-Length' => (string) strlen($transmit),
 			];
 
+			if (isset($lowercase_headers['content-disposition']) && $this->filesVisibleHeaders)
+				throw new \InvalidArgumentException('Content-Disposition file header can not be sent visible.');
+
 			$multipart[] = [
 				'name' => str_replace('"', '\\"', $field['name']), // overcome guzzle bug and escape quotes in form field name, otherwise Content-Disposition header will be invalid
 				'contents' => $tmp_file,
